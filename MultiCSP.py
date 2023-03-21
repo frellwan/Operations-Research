@@ -34,17 +34,48 @@ class cutStock1D():
         Solve the relaxed master problem given a set of patterns and orders.
 
     """
-    def __init__(self, orders, lengths, capacity, cost=None):
-        self.orders = orders
-        self.lengths = lengths
-        self.capacity = capacity
-        if cost == None:
-            self.cost = [1]*len(capacity)
-        else:
-            self.cost = cost
-        self.patterns, self.c = self.initPatterns(max(capacity))
+    def __init__(self, orders, lengths, capacity, cost=None, inventory=None):
+        """
+        Initialize a one-dimensional cutting stock problem.
 
-    def initPatterns(self, W):
+        Parameters:
+        -----------
+        orders : list
+            A list of integers representing the demand for each length.
+        lengths : list
+            A list of integers representing the possible lengths of stock.
+        capacity : int
+            An integer representing the capacity of the reels used to cut the stock.
+        cost : list or None, optional
+            A list of integers representing the cost of each reel. If None, the cost is set to 1.
+        inventory : list or None, optional
+            A list of integers representing the inventory of each reel. If None, the cost is set to 1.
+
+        Returns:
+        --------
+        None
+        """
+        self.orders = np.array(orders)
+        self.lengths = np.array(lengths)
+        self.capacity = np.array(capacity)
+
+        # If cost not given assume a unity cost
+        if cost is None:
+            self.cost = np.array([1]*len(capacity))
+        else:
+            assert len(cost) == len(capacity)
+            self.cost = np.array(cost)
+
+        # If no inventory is given assume infinite inventory
+        if inventory is None:
+            self.v = np.array([10000000]*len(capacity))
+        else:
+            self.v = np.array(inventory)
+
+        # Calculate initial patterns and cost vector used for other calculations
+        self.patterns, self.c = self.initPatterns()
+
+    def initPatterns(self):
         """
         Create a matrix that will be used as the initial set of patterns.
 
@@ -60,44 +91,82 @@ class cutStock1D():
         c : list
             A list of floats representing the cost of each pattern.
         """
-        # Number of rows for the different lengths
         n = len(self.lengths)
+        m = len(self.capacity)
 
-        # Sort w in descending order
-        w_sort = sorted(self.lengths, reverse=True)
-        w_idx = sorted(range(n), key=lambda k: -self.lengths[k])
+        # Sort lengths in descending order and get corresponding indices
+        l_idx = sorted(range(n), key=lambda k: -self.lengths[k])
+        l_sort = [self.lengths[i] for i in l_idx]
 
-        # Initialize R, ib and A
+        # Sort orders corresponding to length sort
+        o_sort = [self.orders[i] for i in l_idx]
+
+        # sort l𝑘 in descending order corresponding to c𝑘
+        c_idx = sorted(range(m), key=lambda k: -self.cost[k])
+        c_sort = [self.capacity[i] for i in c_idx]
+
+        # Initialize pattern cost list
+        c = []
+
+        # Initialize R, ib and A - R is set of items, ib is the array representing the orders
         R = set(range(n))
-        ib = np.array(self.lengths, dtype=float)
-        A = np.zeros((n, n))
+        b_i = np.array(o_sort, dtype=float)
+        A = np.zeros((m+n, m+n))
 
-        # Find initial solution
+        # Find initial pattern
+        idxC = 0
+        cap = c_sort[idxC]
+        reel_idx = c_idx[idxC]
+        inventory = self.v[idxC]
+
+        # Loop through all lengths
         for j in range(n):
+            # Initialize the pattern array to zeros
             a = np.zeros(n)
-            for i in R:
-                if w_sort[i] <= W - np.dot(w_sort, a):
-                    a[i] = np.floor((W - np.dot(w_sort, a))/w_sort[i])
 
-            A[:, j] = a[w_idx]
-            result = np.divide(ib, a, out=np.zeros_like(a), where=a!=0)
+            # Loop through all lengths left to look at
+            for i in R:
+                # Look to see if the next length will fit in the pattern
+                if l_sort[i] <= cap - np.dot(l_sort, a):
+                    a[i] = np.floor((cap - np.dot(l_sort, a)) / l_sort[i])
+
+            # Determine which length's orders have been satisfied
+            result = np.divide(b_i, a, out=np.zeros_like(a), where = a!=0)
             x = np.min(result[np.nonzero(result)])
             idxR = np.where(result == x)[0][0]
-            ib -= x*a
+
+            # Add the cost for the patterns (based on the reel used)
+            c.append(self.cost[reel_idx])
+
+            # Determine which reel has been used
+            reel = np.zeros(m)
+            reel[reel_idx] = 1
+            A[:, j] = np.concatenate((a[l_idx], reel))
+            j += 1
+
+            # Subtract the amount of orders used in this pattern and remove it from further consideration
+            if inventory < np.sum(x*a):
+                print(j, idxC)
+                x = inventory
+                idxC += 1
+                cap = c_sort[idxC]
+                reel_idx = c_idx[idxC]
+                inventory = self.v[idxC]
+            else:
+                inventory -= np.sum(x*a)
+
+            b_i -= x*a
             R.remove(idxR)
 
-            if len(R)==0:
+            if len(R) == 0:
                 break
 
-        if len(capacity) == 1:
-            c = [self.cost[0]]*n
-        else:
-            idxC = np.where(np.array(self.capacity)==W)[0][0]
-            c = [self.cost[idxC] for i in range(n)]
-            reel = np.zeros((len(self.capacity), n))
-            reel[idxC, :] = 1
-            A = np.vstack((A, reel))
+        # Add 0 for costs for any columns without patterns
+        for i in range(m):
+            c.append(0)
+            A[n+i, n+i] = 1.0
 
+        print(A)
         return A.tolist(), c
 
     def addColumn(self, column, idx):
@@ -157,7 +226,8 @@ class cutStock1D():
 
         model = pl.LpProblem("RMP", pl.LpMinimize)
 
-        n = len(self.lengths)
+        m = len(self.lengths)
+        n = len(self.patterns)
         num_patterns = len(self.patterns[0])
 
         # Declare an array to hold our variables.
@@ -169,11 +239,16 @@ class cutStock1D():
         # Constraint requires type double, so need to cast to type double
         if integer:
             for i in range(n):
-                model += pl.lpSum(X[j] * self.patterns[i][j] for j in range(num_patterns)) == self.orders[i]
+                if i < m:
+                    model += pl.lpSum(X[j] * self.patterns[i][j] for j in range(num_patterns)) == self.orders[i]
+                elif self.v[i-m] != np.inf:
+                    model += pl.lpSum(X[j] * self.patterns[i][j] for j in range(num_patterns)) <= self.v[i-m]
         else:
             for i in range(n):
-                model += pl.lpSum(X[j] * self.patterns[i][j] for j in range(num_patterns)) == self.orders[i]
-
+                if i < m:
+                    model += pl.lpSum(X[j] * self.patterns[i][j] for j in range(num_patterns)) == self.orders[i]
+                elif self.v[i-m] != np.inf:
+                    model += pl.lpSum(X[j] * self.patterns[i][j] for j in range(num_patterns)) <= self.v[i-m]
         model.solve(solver)
 
         # Create array of solution values
@@ -235,16 +310,23 @@ capacity = [10, 6, 4] # lengths of the stock materials
 cost = [1.9, 1, 0.6]
 lengths   = [2, 3, 5, 8] # widths of the orders
 orders   = [400, 350, 200, 150] # demands for each order
+inventory = [360, 360, 360]
+
+#orders = [20, 18, 16, 14, 12, 10, 20, 18, 18, 14, 12, 25, 22]
+#orders = [22, 25, 12, 14, 18, 18, 20, 10, 12, 14, 16, 18, 20]
+#lengths = [2200, 2150, 2140, 2100, 2050, 2000, 1930, 1880, 1820, 1710, 1560, 1520, 1380]
+#demand = [1380, 1520, 1560, 1710, 1820, 1880, 1930, 2000, 2050, 2100, 2140, 2150, 2200]
+#capacity = [5600]
 
 #capacity=[100]
 #lengths=[45,36,31,14]
 #orders=[97, 610, 395, 211]
 #cost=[1]
 
-cut = cutStock1D(orders, lengths, capacity, cost)
+cut = cutStock1D(orders, lengths, capacity, cost, inventory)
 
 
-for i in range(10):
+for i in range(30):
     sol, dual, obj, status = cut.solveRMP()
     print("STATUS: ", sol)
     print("OBJ:     ", obj)
@@ -258,8 +340,8 @@ for i in range(10):
         patterns.append(solk)
         objs.append(objk)
 
-    print(patterns)
-    print(objs)
+    print("p: ", patterns)
+    print("o : ", objs)
     reducedCost = np.array(objs)-np.array(cut.cost)
     idx = np.argmax(reducedCost)
     print("IDX: ", idx)
@@ -277,6 +359,5 @@ for i in range(10):
     print("COL: ", solk)
     print("STATUSK: ", statk)
 
-sol, dual, obj, status = cut.solveRMP(integer=True)
-
+soli, duali, obji, statusi = cut.solveRMP(integer=True)
 
