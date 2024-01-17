@@ -360,4 +360,3 @@ for i in range(30):
     print("STATUSK: ", statk)
 
 soli, duali, obji, statusi = cut.solveRMP(integer=True)
-
