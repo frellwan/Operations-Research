@@ -4,44 +4,13 @@ from ortools.sat.python import cp_model
 from fractions import Fraction
 from math import floor
 
-
-class CutStock1D(object):
-    """
-    Class for solving a one-dimensional cutting stock problem.
-
-    Parameters:
-    -----------
-    orders : list
-        A list of integers representing the demand for each length.
-    lengths : list
-        A list of integers representing the possible lengths of stock.
-    capacity : int
-        An integer representing the capacity of the reels used to cut the stock.
-    cost : list or None, optional
-        A list of integers representing the cost of each reel. If None, the cost is set to 1.
-
-    Attributes:
-    -----------
-    patterns : list
-        A list of lists representing the initial set of patterns used to solve the problem.
-    c : list
-        A list of floats representing the cost of each pattern.
-
-    Methods:
-    --------
-    initPatterns(W)
-        Create a matrix that will be used as the initial set of patterns.
-    addColumn(column, idx)
-        Add a new column to the matrix of patterns.
-    solveRMP(integer=False)
-        Solve the relaxed master problem given a set of patterns and orders.
-
-    """
-    def __init__(self, orders, demand, capacity, cost):
+class cutStock1D():
+    def __init__(self, orders, demand, capacity, c):
+        self.solution = None
         self.orders = orders
         self.demand = demand
         self.capacity = capacity
-        self.c = cost
+        self.c = c
         self.A = None
         self.obj = 0
         self.z = None
@@ -49,73 +18,75 @@ class CutStock1D(object):
         self.forbidden = None
 
     def initPatterns(self, demand, capacity):
-        """ Create a diagonal matrix that will be used as the initial set of patterns
+        """ Create a diagonal matrix that will be used as the initial set of patterns.
+            Initial matrix doesn't seem to have much of an effect on the time to determine
+            an optimal solution, so we stick with a simple diagonal matrix meeting the demands
+            given the capacity.
 
-            Inputs: demand   - Demand for each length. ndarray of size (n,n)
+            Inputs: demand   - Demand for each length. ndarray of size (1,n)
                     capacity - capacity of reels. ndarray of size(m)
 
-            Output: patterns - starting point for cut patterns
+            Output: patterns - starting point for cut patterns. ndarray(n,x)
        """
         # TODO
         # Use Fast or Best Fit Decreasing to initialize patterns
 
-        patterns = np.zeros((len(capacity), len(demand), np.sum(demand)//np.max(capacity)+2))
+        i = 0
+        j = 0
+        #patterns = np.zeros((len(demand), 1))   # Initial Pattern
+        a = capacity[0]/demand
+        a = a.astype(int)
+        patterns = np.diag(a)
 
-        # Add 1's in each pattern until the capacity is used up
-        for c in capacity:
-            i = 0
-            j = 0
-            while i < len(demand) and j < len(patterns[1]):
-                if (capacity[c] - patterns[c, :, j]@demand - demand[i]) > 0:
-                    # Still capacity left to fill next demand
-                    patterns[i, j] = 1
-                    i += 1
-                    j = 0
-                else:
-                    # Current pattern filled, use next pattern
-                    j += 1
+        # Add 1's for each demand in a pattern until all demands are accounted for
+        '''while i < len(demand):
+            if (capacity[0] - patterns[:, j]@demand - demand[i]) > 0:
+                # Still capacity left in current pattern to fill this demand
+                patterns[i, j] = 1
+                i += 1
+            else:
+                # Current pattern filled, add another pattern
+                j += 1
+                new_col = np.zeros((len(demand), 1))
+                patterns = np.append(patterns, new_col, 1)
+        '''
+        self.solution = np.ones(patterns.shape[1])
 
-            return patterns
-
+        return patterns
 
     def swapPattern(self, p_j):
         """ With a pattern p_j that can enter the basis, determine which pattern
             will leave the basis. Need to calculate Theta and find the min value
             of theta. The minimum value of Theta will be the index of the pattern
             that will leave the basis.
-   
-            Inputs: p_j   - a pattern that can enter the basis. ndarray of size (n).
-   
+    
+            Inputs: p_j   - a pattern that can enter the basis. ndarray of size(n,1).
+    
             Output: self.patterns is updated to reflect the new patterns in the basis.
        """  # Solve the LP with current set of patterns
-        z_bar, l, _, _ = self.solveRelaxed()
+        z_bar, l, _, _, _ = self.solveRelaxed()
 
         # Determine theta
         p_bar_j = np.matmul(np.linalg.inv(self.patterns), p_j)
 
         # Find the minimum value (exclusive of 0's) of z_bar/p_barj to determine which pattern leaves the basis
-        print("SWAP Z: ", z_bar, z_bar.shape)
-        print("SWAP P: ", p_bar_j, p_bar_j.shape)
         z = np.divide(z_bar, p_bar_j, out=np.zeros_like(z_bar), where=p_bar_j > 0)
-        print('SWAP z: ', z)
 
         # Determine the index of this minimum value to put new pattern in that column
         idx = np.where(z == np.min(z[np.nonzero(z)]))[0][0]
-        print('SWAP idx to change: ', idx)
+
         #self.patterns[:, idx] = p_j
 
     def addPattern(self, newColumn):
-        """ With a pattern p_j that can enter the basis, determine which pattern
-            will leave the basis. Need to calculate Theta and find the min value
-            of theta. The minimum value of Theta will be the index of the pattern
-            that will leave the basis.
+        """ Add new column to the
 
-            Inputs: p_j   - a pattern that can enter the basis. ndarray of size (n,1).
+            Inputs: newColumn - a pattern that can enter the basis. ndarray of size (n,1).
 
             Output: self.patterns is updated to reflect the new patterns in the basis.
        """
         # Add pattern p_j to the patterns matrix
         self.patterns = np.hstack((self.patterns, newColumn.reshape(-1, 1)))
+        self.solution = np.append(self.solution, 1)
 
     def removePattern(self):
         """ With a pattern p_j that can enter the basis, determine which pattern
@@ -140,12 +111,14 @@ class CutStock1D(object):
 
         if integer:
             solver = pywraplp.Solver.CreateSolver('SCIP')
+
         else:
             solver = pywraplp.Solver.CreateSolver('GLOP')
             solver.SetSolverSpecificParametersAsString("solution_feasibility_tolerance:22")
 
         if not solver:
             return -1
+
         constraint = []
         # Declare an array to hold our variables.
         if integer:
@@ -153,8 +126,13 @@ class CutStock1D(object):
         else:
             X = [solver.NumVar(0.0, np.max(self.orders.astype(np.double)), f'x_{i}') for i in range(num_patterns)]
 
-        cost = sum(X[j] for j in range(num_patterns))
-        solver.Minimize(cost)
+        # There are a couple of ways to frame the cost. We can look at minimizing the number of paterns
+        # In the case of a single sized length of fiber will be the same as minimizing waste.
+        # We can also look at minimizing the waste, represented by the size of the length of the spool * the
+        # number of patterns minus the amount of the ordered lengths.
+        #cost1 = sum(X[j] for j in range(num_patterns))
+        cost2 = self.capacity[0] * sum(X[j] for j in range(num_patterns)) - sum(self.demand[k]*self.orders[k] for k in range(n))
+        solver.Minimize(cost2)
 
         # Create the constraints, one per row in patterns - sum(A_ij*X_j) <= orders_i
         # Constraint requires type double, so need to cast to type double
@@ -185,7 +163,8 @@ class CutStock1D(object):
             dual = np.array([constraint[i].DualValue() for i in range(n)])
         self.obj = solver.Objective().Value()
 
-        return solution, dual, status, self.obj
+        self.solution = solution
+        return solution, dual, status, self.obj, solver
 
     def solveKnapsack(self, yi):
         solver = pywraplp.Solver.CreateSolver('CBC')
@@ -213,31 +192,43 @@ demand = np.array([1380, 1520, 1560, 1710, 1820, 1880, 1930, 2000, 2050, 2100, 2
 capacity = np.array([5600])
 c = np.array([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])
 
-
-cut = CutStock1D(orders, demand, capacity, c)
-sol, dual, status, obj = cut.solveRelaxed()
+time = 0
+cut = cutStock1D(orders, demand, capacity, c)
+sol, dual, status, obj, _ = cut.solveRelaxed()
 knapobj, col = cut.solveKnapsack(dual)
 
-for i in range(54):
+
+i = 0
+for i in range(53):
     cut.addPattern(col)
 
-    sol, dual, status, obj = cut.solveRelaxed()
+    sol, dual, status, obj, _ = cut.solveRelaxed()
     if status != 0:
         cut.swapPattern(col)
-        #cut.removePattern()
+        # cut.removePattern()
         print("REMOVED: ", cut.patterns)
         break
 
     knapobj, col = cut.solveKnapsack(dual)
 
-    if knapobj <= 1.000000001:
+    if knapobj <= 5600:
         print("FOUND SOLUTION !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         print("I: ", i)
         break
 
-sol, dual, status, obj = cut.solveRelaxed(integer=True)
-print("SOL FP: ", sol)
-print("SOL: ", np.floor(sol))
+sol, dual, status, obj, solver = cut.solveRelaxed(integer=True)
+print("SOL FP: ", sol, i)
 print("DUAL: ", dual)
 print(cut.patterns@sol)
-print((demand@cut.patterns) - 5600)
+
+# Find the indexes where sol has non-zero values for the patterns
+print(cut.patterns[:, sol != 0].shape)
+
+# Find the remnant amounts
+print(5600 - (demand@cut.patterns))
+print(sum((5600 - (demand@cut.patterns[:, sol != 0]))*sol[sol != 0]))
+print("=====Stats:======")
+# print(solver.SolutionInfo())
+print("=====Response:======")
+# print(solver.ResponseStats())
+#%%
