@@ -3,6 +3,7 @@ from ortools.linear_solver import pywraplp
 import pandas as pd
 from threading import Timer, Lock
 
+
 def solve_assignment(cost, groups, early_stopping=None):
     """
     Solve assignment problem of reducing cost of assigning reel to groups
@@ -26,6 +27,7 @@ def solve_assignment(cost, groups, early_stopping=None):
     # ---------------------------------------------
     # Create the mip solver with the SCIP backend.
     # ---------------------------------------------
+    # solver = pywraplp.Solver.CreateSolver("GLOP_LINEAR_PROGRAMMING")
     solver = pywraplp.Solver.CreateSolver("SCIP")
 
     if not solver:
@@ -39,8 +41,8 @@ def solve_assignment(cost, groups, early_stopping=None):
     d = [[[solver.BoolVar(f'd_{g}{c}{r}') for r in all_reels] for c in all_colors] for g in all_groups]
 
     # min_length[g] * M (length of group[g] (used for objective)
-    m_min_length = [solver.IntVar(0, maxL*num_groups, f'max_length_{g}') for g in all_groups]
-    sum_g = [solver.IntVar(0, maxL*num_colors, f'sum_{g}') for g in all_groups]
+    m_min_length = [solver.NumVar(0, maxL*num_groups, f'max_length_{g}') for g in all_groups]
+    # sum_g = [solver.IntVar(0, maxL*num_colors, f'sum_{g}') for g in all_groups]
 
     # Indicator Variables for color/reel in a group x[group, color, reel]
     X = [[[solver.BoolVar(f'x[{g},{c},{r}]') for r in all_reels] for c in all_colors] for g in all_groups]
@@ -70,7 +72,7 @@ def solve_assignment(cost, groups, early_stopping=None):
         solver.Add(solver.Sum(d[g][c][r] for c in all_colors for r in all_reels) == 1)
 
     for g in all_groups:
-        solver.Add(sum_g[g] == solver.Sum(cost[c][r]*X[g][c][r] for c in all_colors for r in all_reels))
+        # solver.Add(sum_g[g] == solver.Sum(cost[c][r]*X[g][c][r] for c in all_colors for r in all_reels))
         solver.Add(m_min_length[g] == y[g]*groups[g])
 
     for g1 in range(1, num_groups-1):
@@ -87,29 +89,33 @@ def solve_assignment(cost, groups, early_stopping=None):
     solver.Maximize(solver.Sum(m_min_length[g] for g in all_groups))
 
     # Sets a time limit of 5 minutes.
-    solver.SetTimeLimit(1200000)
+    solver.SetTimeLimit(3000000)
     solver.EnableOutput()
     #solver.parameters.search_branching = cp_model.AUTOMATIC_SEARCH
 
     # Solve the Model
+    print("Number of COnstraints: ", solver.NumConstraints())
     status = solver.Solve()
 
-    solver.Maximize(solver.Sum(m_min_length[g] for g in all_groups))
-    #status = solver.SolveWithSolutionCallback(model, solution_printer)
-    #solution_printer.clean()
+    # solver.Maximize(solver.Sum(m_min_length[g] for g in all_groups))
+    # status = solver.SolveWithSolutionCallback(model, solution_printer)
+    # solution_printer.clean()
 
     solution_list = []
+    print("FINISHED WITH: ", status == solver.OPTIMAL)
     if status == solver.OPTIMAL or status == solver.FEASIBLE:
+        print("HERE AFTER SOLVED")
         for g in all_groups:
+            print("SOLUTION: ", y[g].solution_value())
             for c in all_colors:
                 for r in all_reels:
-                    if X[g][c][r].solution_value() == 1:
-                        print(f"Min {g},{c},{r} = {d[g][c][r].solution_value()*cost[c][r]}")
-                        solution_row = {'Reel': r, 'Color': c, 'Group': g, 'Cost': cost[c][r]}
+                    if X[g][c][r].solution_value() >= 0.0:
+                        #print(f"Min {g},{c},{r} = {d[g][c][r].solution_value()*cost[c][r]}")
+                        solution_row = {'Reel': r, 'Color': c, 'Group': g, 'Cost': X[g][c][r].solution_value()}
                         solution_list.append(solution_row)
 
     print('Statistics')
-    print("Min Length: ", [y[i].solution_value() for i in range(len(groups))])
+    #print("Min Length: ", [y[i].solution_value() for i in range(len(groups))])
     #print('  - conflicts : %i' % solver.NumConflicts())
     #print('  - branches  : %i' % solver.NumBranches())
     print('  - wall time : %f s' % solver.WallTime())
@@ -147,7 +153,7 @@ if __name__ == '__main__':
 
     groups = [10, 10, 10, 10, 10, 10, 10, 10, 6]
 
-    solution, sol = solve_assignment(cost, groups, early_stopping=300000)
+    solution, sol = solve_assignment(cost, groups, early_stopping=300)
     print(solution)
     d = pd.DataFrame(solution)
 

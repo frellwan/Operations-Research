@@ -62,7 +62,6 @@ def solve_assignment(cost, groups, early_stopping=None):
     all_colors = range(num_colors)
     all_reels = range(num_reels)
     all_groups = range(num_groups)
-    UB = cp_model.INT32_MAX
 
     # _____________________
     # Create Model Object
@@ -72,22 +71,11 @@ def solve_assignment(cost, groups, early_stopping=None):
     # -----------------------
     # Create Model Variables
     # -----------------------
-    # objective is our objective variable
-    objective = model.NewIntVar(0, UB, 'objective')
-
-    # Helper variables to find minimum non-zero value
+    # Minimum non-zero value for each set
     y = [model.NewIntVar(0, maxL, f'yi_{g}') for g in all_groups]
 
-    # min_length[g] * M (length of group[g] (used for objective)
-    m_min_length = [model.NewIntVar(0, maxL*num_groups, f'max_length_{g}') for g in all_groups]
-    sum_g = [model.NewIntVar(0, maxL*num_colors, f'sum_{g}') for g in all_groups]
-
-    # Indicator Variables for color/reel in a group x[group, color, reel]
-    # a = model.NewBoolVar('a')
-    # b = model.NewBoolVar('b')
-
+    # Indicator variable for assignment of item to group
     X = [[[model.NewBoolVar(f'x[{g},{c},{r}]') for r in all_reels] for c in all_colors] for g in all_groups]
-    # G = [[model.NewIntVar(0, maxL, f'G[{c}{r}') for r in all_reels] for c in all_colors]
 
     # -------------------------
     # Create Model Constraints
@@ -107,64 +95,31 @@ def solve_assignment(cost, groups, early_stopping=None):
     for g in all_groups:
         model.Add(cp_model.LinearExpr.Sum([X[g][c][r] for r in all_reels for c in all_colors]) == groups[g])
 
-    # Determine the smallest non-zero length in the group - implication enforces only looking at non-zero reels
+    # Determine the smallest non-zero length in the set - implication enforces only looking at non-zero reels
     for g in all_groups:
         for c in all_colors:
             for r in all_reels:
                 model.Add(y[g] <= cost[c][r]).OnlyEnforceIf(X[g][c][r])
-
-    # Determine M*min_length in a group (to use in cost function)
-    for g in all_groups:
-        model.Add(sum_g[g] == cp_model.LinearExpr.Sum([cost[c][r]*X[g][c][r] for c in all_colors for r in all_reels]))
-        model.AddMultiplicationEquality(m_min_length[g], y[g], groups[g])
 
     # --------------
     # Break symmetry
     # --------------
     # TODO - Find ways to break symmetry
     # Can swap if abs(y[g1][c1][r1] - y[g2][c2][r2]) <= y[g2][c2][r2]-min_g[2] and y[g1][c1][r1]-min_g[1]
-    """
-    abs_values = [[model.NewIntVar(0, maxL, f'abs_values[{c},{a}') for a in range(num_reels*(num_reels-1)//2)] for c in all_colors]
-    for c in all_colors:
-        i = 0
-        for r1 in all_reels:
-            for r2 in range(r1+1, num_reels):
-                if groups[r1] == groups[r2]:
-                    v = model.NewIntVar(-maxL, maxL, "v")     # Temporary variable
-                    model.Add(v == G[c][r1] - G[c][r2])
-                    model.AddAbsEquality(abs_values[c][i], v)
-                    model.Add(abs_values[c][i] <= G[c][r1]-y[r1]).OnlyEnforceIf(a)
-                    model.Add(abs_values[c][i] <= G[c][r2]-y[r2]).OnlyEnforceIf(b)
-                    model.Add(G[c][r1] >= G[c][r2]).OnlyEnforceIf([a, b])
-                
-                i += 1
-    """
-    # ----------
-    # Objective
-    # ----------
-    # Objective cost - Minimize the differences between reel lengths in each group (same as min(sum_g-m*min))
-    model.Add(objective == cp_model.LinearExpr.Sum([sum_g[g] - m_min_length[g] for g in all_groups]))
-    model.Minimize(objective)
-
-    # Could also use the following - different objective value, but same end result (doesn't appear to effect speed)
-    # model.Add(objective == sum(m_min_length[g] for g in all_groups))
-    # model.Maximize(objective)
-
+    for g in range(1, num_groups):
+        model.Add(y[g] >= y[g-1])
     # ---------
     # Add Hint
     # ---------
-    '''
-    r = 0
-    for g in all_groups:
-        for c in all_colors:
-            if cost[c][r] != 0:
-                model.AddHint(X[g][c][r], 1)
-        r += 1
-    '''
+
+    # ----------------
+    # Create Objective
+    # ----------------
+    model.Maximize(cp_model.LinearExpr.Sum([y[g] * groups[g] for g in all_groups]))
 
     # Setup Early Stopping when solutions don't improve within time limit (s)
     if early_stopping is not None:
-        solution_printer = EarlyStoppingLogger([objective], early_stopping)
+        solution_printer = EarlyStoppingLogger([cp_model.LinearExpr.Sum([y[g] * groups[g] for g in all_groups])], early_stopping)
 
     # -------------------------------------
     # Create a solver and solve the model
@@ -172,14 +127,11 @@ def solve_assignment(cost, groups, early_stopping=None):
     solver = cp_model.CpSolver()
     solver.parameters.num_search_workers = 8
     solver.parameters.min_num_lns_workers = 2
-    # solver.parameters.keep_all_feasible_solutions_in_presolve = True
-
+    # solver.parameters.search_branching = solver.parameters.PSEUDO_COST_SEARCH
     # Sets a time limit of 5 minutes.
     solver.parameters.max_time_in_seconds = 300000.0
 
-    # solver.parameters.search_branching = cp_model.AUTOMATIC_SEARCH
     solver.parameters.log_search_progress = True
-    # solver.parameters.keep_all_feasible_solutions_in_presolve = True
 
     # Solve the Model
     status = solver.SolveWithSolutionCallback(model, solution_printer)
@@ -199,7 +151,7 @@ def solve_assignment(cost, groups, early_stopping=None):
 
     print(solver.StatusName())
     print('Statistics')
-    print("Min Length: ", [solver.Value(m_min_length[i])/groups[i] for i in range(len(groups))])
+    print("Min Length: ", [solver.Value(y[i]) for i in range(len(groups))])
     print('  - conflicts : %i' % solver.NumConflicts())
     print('  - branches  : %i' % solver.NumBranches())
     print('  - wall time : %f s' % solver.WallTime())
@@ -222,22 +174,6 @@ if __name__ == '__main__':
              [47, 101, 71, 60, 88, 109, 52, 90, 52]]
 
     groups = [10, 10, 10, 10, 10, 10, 10, 10, 6]
-    '''
-    '''
-    cost =  [[90, 89, 76, 76, 76, 75, 75, 74, 73, 71, 70, 70, 68, 50, 12],
-             [101, 90, 85, 83, 76, 74, 73, 70, 70, 65, 55, 48, 35, 35, 0],
-             [125, 120, 105, 95, 90, 80, 73, 59, 59, 55, 43, 36, 0, 0, 0],
-             [115, 110, 104, 95, 90, 83, 81, 73, 71, 70, 56, 45, 37, 32, 0],
-             [105, 99, 93, 88, 88, 80, 80, 75, 67, 62, 60, 59, 59, 43, 0],
-             [110, 107, 105, 95, 91, 81, 81, 81, 65, 47, 45, 34, 31, 0, 0],
-             [115, 107, 99, 90, 89, 88, 69, 63, 51, 51, 48, 45, 41, 38, 0],
-             [115, 109, 92, 85, 77, 73, 72, 71, 57, 47, 36, 0, 0, 0, 0],
-             [118, 111, 105, 97, 92, 65, 63, 61, 56, 56, 49, 39, 0, 0, 0],
-             [109, 101, 90, 88, 71, 67, 60, 54, 52, 52, 47, 33, 0, 0, 0],
-             [115, 107, 100, 99, 85, 73, 62, 51, 49, 0, 0, 0, 0, 0, 0],
-             [105, 99, 99, 99, 88, 85, 83, 72, 69, 67, 55, 46, 0, 0, 0]]
-    
-    groups = [12, 12, 12, 12, 12, 12, 12, 12, 9, 9, 9, 8, 7, 7, 7]
     '''
 
     cost = [[ 90,  89,  76, 76, 76, 75, 75, 74, 73, 71, 70, 70, 68, 50, 12],
@@ -266,10 +202,11 @@ if __name__ == '__main__':
     ]
     groups = [6, 6, 6, 6, 6]
     '''
-    solution, sol = solve_assignment(cost, groups, early_stopping=3000)
+    solution, sol = solve_assignment(cost, groups, early_stopping=300)
     d = pd.DataFrame(solution)
 
     # Calculate the remnant associated with each reel (length - min of group)
     d['Remnant'] = d['Cost'] - d.groupby('Group')['Cost'].transform('min')
     print(sum(d['Remnant']))
+
 #%%
